@@ -5,11 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "exchange-calendars>=4.13.2",
     "finrl>=0.3.7",
     "mlflow>=3.11.1",
     "optuna>=4.8.0",
     "polars>=1.39.3",
     "shap>=0.51.0",
     "stable-baselines3>=2.8.0",
+    "stockstats>=0.6.8",
+    "wrds>=3.5.0",
     "yfinance>=1.2.1",
 ]

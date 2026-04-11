@@ -30,27 +30,14 @@ def fetch_and_process_data() -> pd.DataFrame:
     Downloads historical data via YFinance, processes it via Polars for speed,
     and formats for FinRL's FeatureEngineer.
     """
+    from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
     print(f"Downloading 10 years of data for: {TICKERS}")
-    # yf.download gives multi-index columns, so we parse it into a standard format
-    df_raw = yf.download(TICKERS, start=START_DATE, end=END_DATE)
     
-    # Restructure the DataFrame to match FinRL requirements (date, tic, open, high, low, close, volume)
-    data_list = []
-    for tic in TICKERS:
-        temp_df = df_raw.xs(tic, level=1, axis=1).copy() if isinstance(df_raw.columns, pd.MultiIndex) else df_raw.copy()
-        # Fallback handling just in case single/multi-index issues
-        if "Close" in temp_df:
-            temp_df["tic"] = tic
-            temp_df["date"] = temp_df.index
-            temp_df = temp_df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
-            data_list.append(temp_df[["date", "tic", "open", "high", "low", "close", "volume"]])
-    
-    final_df = pd.concat(data_list, ignore_index=True)
-    final_df["date"] = pd.to_datetime(final_df["date"]).dt.strftime('%Y-%m-%d')
-    final_df = final_df.sort_values(["tic", "date"]).reset_index(drop=True)
+    # Let FinRL handle the ugly Yahoo Finance Multi-Index scraping perfectly natively
+    df_raw = YahooDownloader(start_date=START_DATE, end_date=END_DATE, ticker_list=TICKERS).fetch_data()
 
     # Use Polars for blazingly fast data manipulation and cleaning before feeding to FinRL
-    pl_df = pl.from_pandas(final_df)
+    pl_df = pl.from_pandas(df_raw)
     pl_df = pl_df.drop_nulls()  # Clean nulls using polars
     
     # Log some stats using polars
@@ -58,6 +45,8 @@ def fetch_and_process_data() -> pd.DataFrame:
     
     # Back to pandas just because FinRL's FeatureEngineer natively expects Pandas for technical indicator generation
     pd_df = pl_df.to_pandas()
+    # Cast date explicitly again to avoid stockstats format issues
+    pd_df['date'] = pd_df['date'].astype(str)
     
     # Setup technical indicators
     print("Engineering MACD and RSI (30 days)...")
