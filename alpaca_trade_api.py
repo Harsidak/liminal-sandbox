@@ -1,4 +1,4 @@
-# Mock Alpaca Trade API module to bypass FinRL dependency crash 
+﻿# Mock Alpaca Trade API module to bypass FinRL dependency crash 
 # without breaking yfinance/urllib3/requests
 
 class MockObject:

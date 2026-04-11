@@ -1,4 +1,4 @@
-# Mock CCXT module to bypass FinRL dependency crash 
+﻿# Mock CCXT module to bypass FinRL dependency crash 
 # without breaking the environment
 
 class MockObject:
