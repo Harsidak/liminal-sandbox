@@ -8,7 +8,7 @@ from src.data_pipeline import fetch_and_process_data
 from src.training import make_objective, train_final_model
 
 def run():
-    # Top 5 diverse Indian Assets for our sandbox
+    # Top 5 diverse Indian Assets + macroeconomic proxies (VIX, TNX, Gold) as exogenous state
     TICKERS = ["NIFTYBEES.NS", "RELIANCE.NS", "HDFCBANK.NS", "GOLDBEES.NS", "INFY.NS"]
     START_DATE = "2014-01-01"
     END_DATE = "2024-01-01"
@@ -17,8 +17,8 @@ def run():
     os.makedirs("data", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
 
-    # Step 1: Prep Data (Downloads 10 years of history, processes via Polars)
-    # HDFCBANK.NS natively skips the delisted errors that TATAMOTORS.NS caused!
+    # Step 1: Prep Data (Downloads 10 years of history + macroeconomic proxies)
+    # NOTE: Delete data/processed_indian_assets.csv to force re-download after pipeline changes
     processed_data_path = "data/processed_indian_assets.csv"
     if not os.path.exists(processed_data_path):
         df = fetch_and_process_data(START_DATE, END_DATE, TICKERS)
