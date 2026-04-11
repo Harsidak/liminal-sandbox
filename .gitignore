@@ -1,6 +1,46 @@
-.venv
-__pycache__
-*.pyc
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints
+
+# Build / Packaging / Distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDEs / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# uv and Python package management
 uv.lock
-*.toml
-*.lock
+pyproject.toml
+
+# Project specific artifacts (Data, Models, MLFlow)
+data/
+models/
+logs/
+mlruns/
+*.zip
+*.csv
