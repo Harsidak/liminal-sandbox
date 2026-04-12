@@ -44,4 +44,3 @@ logs/
 mlruns/
 mlflow.db
 data/processed_indian_assets.csv
-*.zip
