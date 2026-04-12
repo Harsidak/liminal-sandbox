@@ -480,18 +480,34 @@ The institutional audit HTML report covers the champion model's performance acro
 
 ### Prerequisites
 
+You can set up the environment using either **uv** (recommended for speed and reliability) or standard **pip**.
+
+#### Option A: Using uv (Recommended)
 ```powershell
-# Install uv (modern Python package manager)
+# Install uv
 pip install uv
 
-# Create virtual environment and install all dependencies
+# Initialize uv 
+uv init
+
+# Sync environment (automatically creates .venv and installs pinned deps)
 uv sync
+```
+
+#### Option B: Using standard pip
+```powershell
+# Create a virtual environment
+python -m venv .venv
+.\.venv\Scripts\activate
+
+# Install from requirements.txt
+pip install -r requirements.txt
 ```
 
 ### Step 1: Train the Agent
 
 ```powershell
-# Downloads 10 years of market data, runs Optuna HPO, trains to 3M steps
+# Downloads 10 years of market data, runs Optuna HPO, trains to 3M steps.
 # Checkpoints are saved every 250k steps to models/checkpoints/
 python main.py
 ```
@@ -502,35 +518,38 @@ python main.py
 ### Step 2: Select the Champion
 
 ```powershell
-# Evaluates all checkpoints on 2023 holdout data (5 episodes each)
+# Evaluates all checkpoints on 2023 holdout data (5 episodes each).
 # Promotes the highest-Sharpe checkpoint to models/champion_model.zip
-python src/stitch.py
+python -m src.stitch
 ```
 
 ### Step 3: Generate the Audit Report
 
 ```powershell
-# Runs champion model on 2024-present test data
+# Runs champion model on 2024-present test data.
 # Generates:
-#   docs/metrics/institutional_audit.html   — full tear sheet
-#   docs/metrics/underwater_drawdown.svg    — drawdown chart
-#   docs/metrics/shap_insights.png          — SHAP explainability
-python src/evaluate.py
+#   docs/metrics/institutional_audit.html   -> full tear sheet
+#   docs/metrics/underwater_drawdown.svg    -> drawdown chart
+#   docs/metrics/shap_insights.png          -> SHAP explainability
+python -m src.evaluate
 ```
 
 ### Step 4: View MLflow Experiments
 
 ```powershell
-mlflow ui
+# Start the MLflow tracking server
+mlflow ui --backend-store-uri sqlite:///mlflow.db
 # Navigate to http://127.0.0.1:5000
 ```
 
 ### Step 5: TensorBoard Training Curves
 
 ```powershell
+# Visualise training loss, reward, and entropy metrics
 tensorboard --logdir logs/
 # Navigate to http://localhost:6006
 ```
+
 
 ---
 
