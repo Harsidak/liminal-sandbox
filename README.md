@@ -536,7 +536,7 @@ tensorboard --logdir logs/
 
 ## 14. Future Roadmap
 
-The current implementation represents a **complete, production-hardened V1 pipeline**. The following improvements are planned:
+The current implementation represents a **complete, production-hardened V1 pipeline**. The following improvements are planned(not confirmed but under review):
 
 ### Near-Term
 
@@ -562,7 +562,7 @@ The current implementation represents a **complete, production-hardened V1 pipel
 
 ## License
 
-[MIT License](LICENSE) — see `LICENSE` file for details.
+[APACHE 2.0 License](LICENSE) — see `LICENSE` file for details.
 
 ---
 
