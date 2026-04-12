@@ -39,7 +39,7 @@ pyproject.toml
 
 # Project specific artifacts (Data, Models, MLFlow)
 data/
-models/
+# models/
 logs/
 mlruns/
 mlflow.db
