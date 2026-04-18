@@ -33,7 +33,7 @@ def run():
     print("\nStarting Optuna Hyperparameter Optimization...")
     with mlflow.start_run(run_name="Optuna_Optimization"):
         study = optuna.create_study(direction="maximize")
-        study.optimize(make_objective(df), n_trials=3) # set n_trials larger for actual tuning
+        study.optimize(make_objective(df), n_trials=30) # set n_trials larger for actual tuning
         
         print("\nBest Hyperparameters:", study.best_params)
         mlflow.log_params(study.best_params)
