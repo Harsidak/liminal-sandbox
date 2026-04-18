@@ -42,7 +42,7 @@ import quantstats as qs
 import torch
 import shap
 import yfinance as yf
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO as PPO
 
 from src.data_pipeline import fetch_and_process_data
 from src.environment import build_environment
@@ -53,31 +53,30 @@ from src.environment import build_environment
 # =====================================================================
 TICKERS = ["NIFTYBEES.NS", "RELIANCE.NS", "HDFCBANK.NS", "GOLDBEES.NS", "INFY.NS"]
 TICKER_LABELS = ["NIFTYBEES", "RELIANCE", "HDFCBANK", "GOLDBEES", "INFY"]
-TECH_INDICATORS = ["macd", "rsi_30", "vix_close", "tnx_close", "gold_close"]
+TECH_INDICATORS = ["macd", "rsi_30", "vix_close", "tnx_close", "gold_close", "volume"]
 TEST_START = "2024-01-01"
 
+# Dynamically append covariance feature names alphabetically
+sorted_labels = sorted(TICKER_LABELS)
+for i in range(len(sorted_labels)):
+    for j in range(i, len(sorted_labels)):
+        TECH_INDICATORS.append(f"cov_{sorted_labels[i]}_{sorted_labels[j]}")
 
 def _build_feature_names():
     """
     Reconstructs human-readable names for each element of the flat
     state vector produced by StrategistTradingEnv.
-
-    State layout (for 5 tickers, 5 indicators):
-      [cash]                               →  1
-      [price_t1 … price_t5]                →  5
-      [shares_t1 … shares_t5]              →  5
-      [macd_t1 … macd_t5]                  →  5
-      [rsi_30_t1 … rsi_30_t5]              →  5
-      [vix_close_t1 … vix_close_t5]        →  5
-      [tnx_close_t1 … tnx_close_t5]       →  5
-      [gold_close_t1 … gold_close_t5]      →  5
-                                      Total = 36
     """
     names = ["cash"]
     names += [f"price_{t}" for t in TICKER_LABELS]
     names += [f"shares_{t}" for t in TICKER_LABELS]
     for tech in TECH_INDICATORS:
-        names += [f"{tech}_{t}" for t in TICKER_LABELS]
+        if tech.startswith("cov_"):
+            # Covariance is a global array but repeated across stock_dim? 
+            # Yes, FinRL replicates ALL indicators across all tickers.
+            names += [f"{tech}_{t}" for t in TICKER_LABELS]
+        else:
+            names += [f"{tech}_{t}" for t in TICKER_LABELS]
     return names
 
 
@@ -115,7 +114,8 @@ def generate_shap_report(model, docs_dir, portfolio_returns):
     obs = vec_env.reset()
     for _ in range(50):
         obs_samples.append(obs[0].copy())
-        action, _ = model.predict(obs, deterministic=True)
+        action_masks = np.array(vec_env.env_method("action_masks"))
+        action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
         obs, _, dones, _ = vec_env.step(action)
         if dones[0]:
             obs = vec_env.reset()
@@ -210,7 +210,8 @@ def main():
     done = False
 
     while not done:
-        action, _ = model.predict(obs, deterministic=True)
+        action_masks = env_test.action_masks()
+        action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
         step_out = env_test.step(action)
         
         if len(step_out) == 5:  # Gymnasium API

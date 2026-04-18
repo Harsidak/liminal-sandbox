@@ -2,7 +2,7 @@ import os
 import optuna
 import mlflow
 import numpy as np
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO as PPO
 from src.environment import build_environment
 
 def make_objective(df):
@@ -60,7 +60,8 @@ def make_objective(df):
             obs = vec_env.reset()
             total_rewards = []
             for _ in range(500):
-                action, _states = model.predict(obs, deterministic=True)
+                action_masks = np.array(vec_env.env_method("action_masks"))
+                action, _states = model.predict(obs, deterministic=True, action_masks=action_masks)
                 obs, rewards, dones, info = vec_env.step(action)
                 total_rewards.append(rewards[0])
 
@@ -119,8 +120,8 @@ def train_final_model(df, best_params):
 
     # --- Phase 1: Initial 500k step safety run ---
     # Get a usable model on disk ASAP before committing to the full marathon.
-    print("\n[Phase 1/2] Training initial 500k steps (safety backup)...")
-    final_model.learn(total_timesteps=500_000, callback=checkpoint_cb)
+    print("\n[Phase 1/2] Training initial 1M steps (safety backup)...")
+    final_model.learn(total_timesteps=1_000_000, callback=checkpoint_cb)
 
     os.makedirs("models", exist_ok=True)
     backup_path = "models/liminal_ppo_agent_backup"
@@ -130,9 +131,9 @@ def train_final_model(df, best_params):
 
     # --- Phase 2: Continue to 3M total steps ---
     # SB3's learn() with reset_num_timesteps=False continues from where Phase 1 left off.
-    print("\n[Phase 2/2] Continuing training to 3M total steps...")
+    print("\n[Phase 2/2] Continuing training to 10M total steps...")
     final_model.learn(
-        total_timesteps=2_500_000,
+        total_timesteps=10_000_000,
         callback=checkpoint_cb,
         reset_num_timesteps=False,
     )

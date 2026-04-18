@@ -1,5 +1,6 @@
 import numpy as np
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+from gymnasium import spaces
 
 
 class StrategistTradingEnv(StockTradingEnv):
@@ -48,6 +49,33 @@ class StrategistTradingEnv(StockTradingEnv):
         # 15% dd → -0.225 (moderate drag)
         # 40% dd → -1.600 (devastating)
         self.drawdown_penalty_scale = drawdown_penalty_scale
+        
+        # --- MultiDiscrete Support for MaskablePPO ---
+        # 21 bins means 10 is 'hold', 20 is 'max buy', 0 is 'max sell'
+        # This discrete space ensures sb3-contrib MaskablePPO functions without crashing
+        self.action_space = spaces.MultiDiscrete([21] * self.stock_dim)
+
+    def action_masks(self):
+        """
+        Hard constraint mask: If an asset currently holds > 40% of the portfolio's total value,
+        mask (disable) further BUY actions for that specific asset.
+        """
+        prices = np.array(self.state[1 : 1 + self.stock_dim])
+        holdings = np.array(self.state[1 + self.stock_dim : 1 + 2 * self.stock_dim])
+        cash = self.state[0]
+        
+        portfolio_value = cash + np.sum(prices * holdings)
+        masks = np.ones((self.stock_dim, 21), dtype=bool)
+        
+        if portfolio_value > 0:
+            asset_weights = (prices * holdings) / portfolio_value
+            for i in range(self.stock_dim):
+                if asset_weights[i] > 0.40:
+                    # Disable all BUY bins (11 to 20)
+                    masks[i, 11:] = False
+                    
+        # sb3-contrib requires a 1D flat array for MultiDiscrete masks
+        return masks.flatten()
 
     def step(self, actions):
         # =====================================================================
@@ -58,13 +86,36 @@ class StrategistTradingEnv(StockTradingEnv):
         if not self.terminal:
             self.state[0] *= self.daily_decay_factor
 
-        # =====================================================================
-        # Phase 2: EXECUTE PARENT'S FULL TRADE CYCLE
-        # Handles: action scaling by hmax, sell/buy execution with transaction
-        # costs, day advancement, state vector update, and raw portfolio value
-        # change stored in asset_memory.
-        # =====================================================================
-        state, reward, terminal, truncated, info = super().step(actions)
+        # Decode MultiDiscrete (0-20 bins) to Continuous [-1, 1] for FinRL backend
+        continuous_actions = (actions - 10) / 10.0
+
+        if not self.terminal:
+            # Snapshot state for slippage derivation
+            old_holdings = np.array(self.state[1 + self.stock_dim : 1 + 2 * self.stock_dim])
+            
+            # Execute trade cycle
+            state, reward, terminal, truncated, info = super().step(continuous_actions)
+            
+            # --- Dynamic Slippage ---
+            # Cost = Base_fee + K * price * shares * sqrt(shares / volume)
+            new_holdings = np.array(self.state[1 + self.stock_dim : 1 + 2 * self.stock_dim])
+            prices = np.array(self.state[1 : 1 + self.stock_dim])
+            
+            # The environment pulls tech_indicators into self.data sequentially
+            # Volume is at index 5 in the tech_indicator list (MACD, RSI, VIX, TNX, Gold, Volume...)
+            if hasattr(self, "data") and "volume" in self.data:
+                volumes = self.data["volume"].values
+                volumes_safe = np.maximum(volumes, 1.0)
+                shares_traded = np.abs(new_holdings - old_holdings)
+                
+                # Dynamic slip penalty constant
+                K = 0.05
+                dynamic_slip = np.sum(0.001 * prices * shares_traded + K * prices * shares_traded * np.sqrt(shares_traded / volumes_safe))
+                
+                self.state[0] -= dynamic_slip
+                self.asset_memory[-1] -= dynamic_slip
+        else:
+            state, reward, terminal, truncated, info = super().step(continuous_actions)
 
         # =====================================================================
         # Phase 3: OVERRIDE REWARD WITH RISK-ADJUSTED METRIC
@@ -122,7 +173,9 @@ def build_environment(df, inflation_rate=0.08, sharpe_lookback=60, drawdown_pena
     stock_dimension = len(df.tic.unique())
 
     # Expanded indicator list: momentum (MACD, RSI) + macroeconomic (VIX, TNX, Gold)
-    tech_indicator_list = ["macd", "rsi_30", "vix_close", "tnx_close", "gold_close"]
+    # Add volume & covariance tracking (dynamic search)
+    cov_cols = [c for c in df.columns if c.startswith("cov_")]
+    tech_indicator_list = ["macd", "rsi_30", "vix_close", "tnx_close", "gold_close", "volume"] + cov_cols
 
     state_space = 1 + 2 * stock_dimension + len(tech_indicator_list) * stock_dimension
     print(f"State Space Dimension: {state_space}")
@@ -131,8 +184,8 @@ def build_environment(df, inflation_rate=0.08, sharpe_lookback=60, drawdown_pena
         "hmax": 1000,                                   # Portfolio-scale position sizing (was 100)
         "initial_amount": 100000,                        # ₹1,00,000 INR
         "num_stock_shares": [0] * stock_dimension,
-        "buy_cost_pct": [0.001] * stock_dimension,       # 0.1% Broker/Exchange Fee
-        "sell_cost_pct": [0.001] * stock_dimension,      # 0.1% Broker/Exchange Fee
+        "buy_cost_pct": [0.0] * stock_dimension,         # 0% base (moved to dynamic slippage)
+        "sell_cost_pct": [0.0] * stock_dimension,        # 0% base (moved to dynamic slippage)
         "state_space": state_space,
         "stock_dim": stock_dimension,
         "tech_indicator_list": tech_indicator_list,

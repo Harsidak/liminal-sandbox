@@ -1,6 +1,7 @@
 import pandas as pd
 import yfinance as yf
 import stockstats
+import numpy as np
 
 # --- Macroeconomic Proxy Tickers ---
 # These are exogenous state variables that let the agent "see" the broader economy.
@@ -124,8 +125,21 @@ def fetch_and_process_data(start_date: str, end_date: str, tickers: list) -> pd.
         stock = stockstats.StockDataFrame.retype(tic_df.copy())
 
         # Pull generated series straight into target frames
-        tic_df["macd"] = stock["macd"].values
-        tic_df["rsi_30"] = stock["rsi_30"].values
+        macd = stock["macd"].values
+        rsi_30 = stock["rsi_30"].values
+        
+        # Z-Score Normalization (rolling 252-day)
+        macd_series = pd.Series(macd)
+        rsi_series = pd.Series(rsi_30)
+        
+        macd_mean = macd_series.rolling(window=252, min_periods=1).mean()
+        macd_std = macd_series.rolling(window=252, min_periods=1).std().replace(0, 1e-8).fillna(1e-8)
+        tic_df["macd"] = ((macd_series - macd_mean) / macd_std).values
+        
+        rsi_mean = rsi_series.rolling(window=252, min_periods=1).mean()
+        rsi_std = rsi_series.rolling(window=252, min_periods=1).std().replace(0, 1e-8).fillna(1e-8)
+        tic_df["rsi_30"] = ((rsi_series - rsi_mean) / rsi_std).values
+
         processed_tables.append(tic_df)
 
     processed_df = pd.concat(processed_tables, ignore_index=True)
@@ -159,6 +173,48 @@ def fetch_and_process_data(start_date: str, end_date: str, tickers: list) -> pd.
     counts = processed_df.groupby("date").size()
     valid_dates = counts[counts == len(unique_tickers)].index
     processed_df = processed_df[processed_df["date"].isin(valid_dates)].reset_index(drop=True)
+
+    # =========================================================================
+    # Step 4.5: Rolling Covariance Matrix Features
+    # Calculates a rolling 60-day covariance matrix of daily returns to capture
+    # asset correlation and enable hedging behavior natively.
+    # =========================================================================
+    print("Calculating rolling covariance matrix (60 days)...")
+    pivot_df = processed_df.pivot(index="date", columns="tic", values="close")
+    returns_df = pivot_df.pct_change()
+    
+    # Calculate rolling covariance (shape: N dates x 5 x 5)
+    rolling_cov = returns_df.rolling(window=60, min_periods=1).cov()
+    
+    cov_features = []
+    dates = returns_df.index
+    unique_tics_sorted = list(pivot_df.columns)
+    
+    for date in dates:
+        if date in rolling_cov.index.get_level_values(0):
+            cov_mat = rolling_cov.loc[date].values
+            # Extract upper triangle including diagonal
+            idx = np.triu_indices_from(cov_mat)
+            flat_cov = cov_mat[idx]
+            
+            # If flat_cov has NaNs (e.g. first few days), fill with 0
+            if np.isnan(flat_cov).any():
+                flat_cov = np.nan_to_num(flat_cov)
+                
+            cov_features.append(flat_cov)
+        else:
+            cov_features.append(np.zeros(len(unique_tics_sorted) * (len(unique_tics_sorted) + 1) // 2))
+            
+    cov_feature_names = []
+    for i in range(len(unique_tics_sorted)):
+        for j in range(i, len(unique_tics_sorted)):
+            cov_feature_names.append(f"cov_{unique_tics_sorted[i].replace('.NS', '')}_{unique_tics_sorted[j].replace('.NS', '')}")
+            
+    cov_df = pd.DataFrame(cov_features, columns=cov_feature_names, index=dates)
+    cov_df = cov_df.reset_index()
+    
+    # Merge back to processed_df
+    processed_df = processed_df.merge(cov_df, on="date", how="left")
 
     # =========================================================================
     # Step 5: Set FinRL-compatible index
