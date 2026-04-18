@@ -3,7 +3,33 @@ import optuna
 import mlflow
 import numpy as np
 from sb3_contrib import MaskablePPO as PPO
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 from src.environment import build_environment
+
+class MLflowCallback(BaseCallback):
+    """
+    Custom callback to stream live episode rewards and training lengths
+    directly to the MLflow UI so you don't have to rely solely on Tensorboard.
+    """
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        
+    def _on_step(self) -> bool:
+        # Log every 2000 steps to keep the UI snappy and avoid API limits
+        if self.n_calls % 2000 == 0:
+            if hasattr(self.model, "ep_info_buffer") and len(self.model.ep_info_buffer) > 0:
+                ep_reward = self.model.ep_info_buffer[-1]["r"]
+                ep_length = self.model.ep_info_buffer[-1]["l"]
+                
+                # Live single-episode metric
+                mlflow.log_metric("train/ep_reward_last", ep_reward, step=self.num_timesteps)
+                mlflow.log_metric("train/ep_length", ep_length, step=self.num_timesteps)
+                
+                # Smoothed 100-episode moving average (key proxy for actual learning!)
+                ep_rews = [ep_info["r"] for ep_info in self.model.ep_info_buffer]
+                mlflow.log_metric("train/ep_reward_mean100", np.mean(ep_rews), step=self.num_timesteps)
+        return True
+
 
 def make_objective(df):
     """
@@ -50,10 +76,9 @@ def make_objective(df):
                 verbose=0,
             )
 
-            # Train for 50k timesteps per trial — long enough to measure
-            # whether a hyperparameter set actually enables meaningful learning.
-            # (Previous 2k was too short to differentiate good vs bad configs.)
-            model.learn(total_timesteps=50_000)
+            # Train for 50k timesteps per trial with live MLflow streaming
+            mlflow_cb = MLflowCallback()
+            model.learn(total_timesteps=50_000, callback=mlflow_cb)
 
             # Pseudo-evaluation (In a real scenario, use a validation split environment)
             vec_env = model.get_env()
@@ -88,11 +113,8 @@ def train_final_model(df, best_params):
     Safety strategy for i5-13th Gen / RTX 4050 hardware:
     1. Saves a checkpoint every 250k steps to models/checkpoints/
     2. Runs initial 500k steps first, saves a backup .zip
-    3. Continues training to 3M total steps with ongoing checkpoints
-    If thermal throttling kills the process, the latest checkpoint survives.
+    3. Continues training to 10M total steps with ongoing checkpoints
     """
-    from stable_baselines3.common.callbacks import CheckpointCallback
-
     print("\nTraining Final PPO Agent with optimized parameters...")
     env, _ = build_environment(df)
 
@@ -117,11 +139,14 @@ def train_final_model(df, best_params):
         save_replay_buffer=False,
         save_vecnormalize=False,
     )
+    
+    # Combine standard checkpoint saving with our live MLflow streaming
+    callback = CallbackList([checkpoint_cb, MLflowCallback()])
 
     # --- Phase 1: Initial 500k step safety run ---
     # Get a usable model on disk ASAP before committing to the full marathon.
     print("\n[Phase 1/2] Training initial 1M steps (safety backup)...")
-    final_model.learn(total_timesteps=1_000_000, callback=checkpoint_cb)
+    final_model.learn(total_timesteps=1_000_000, callback=callback)
 
     os.makedirs("models", exist_ok=True)
     backup_path = "models/liminal_ppo_agent_backup"
@@ -134,7 +159,7 @@ def train_final_model(df, best_params):
     print("\n[Phase 2/2] Continuing training to 10M total steps...")
     final_model.learn(
         total_timesteps=10_000_000,
-        callback=checkpoint_cb,
+        callback=callback,
         reset_num_timesteps=False,
     )
 
