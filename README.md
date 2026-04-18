@@ -22,6 +22,7 @@ An end-to-end **Macro-Aware Portfolio Allocation Engine** built with Deep Reinfo
 12. [Audit Results](#12-audit-results)
 13. [How to Run the Full Pipeline](#13-how-to-run-the-full-pipeline)
 14. [Future Roadmap](#14-future-roadmap)
+15. [Hackathon-Optimized Quant Upgrades](#15-hackathon-optimized-quant-upgrades)
 
 ---
 
@@ -576,6 +577,33 @@ The current implementation represents a **complete, production-hardened V1 pipel
 - [ ] **Live Paper Trading Bridge** — Connect the champion model to a live NSE data feed and Zerodha Kite API for paper trading.
 - [ ] **Attention-Based Policy** — Replace the MlpPolicy with a Transformer-based architecture to capture longer-range temporal dependencies in market data.
 - [ ] **Alternative Data** — Integrate India-specific macro signals: RBI policy rates, IIP data, FII/DII flows.
+
+---
+
+## 15. Hackathon-Optimized Quant Upgrades
+
+All four hackathon-optimized features have been successfully implemented! These changes introduce serious institutional sophistication without breaking the explainability features (`SHAP`) or exceeding compute budgets.
+
+### 15.1 Z-Score Momentum (`src/data_pipeline.py`)
+- Replaced raw MACD and RSI with their 252-day rolling Z-Scores. 
+- **The Wow Factor:** This effectively standardizes the volatility of these signals, ensuring the AI reacts calmly to massive macro crashes without observing unbounded feature spikes as it operates live.
+
+### 15.2 Rolling Covariance Matrix (`src/data_pipeline.py` & `src/environment.py`)
+- Introduced a new step computing a 60-day rolling covariance matrix across all 5 tickers.
+- Extracted the flattened upper triangle of that symmetric matrix resulting in *15 dynamic covariance features* per step.
+- Updated `build_environment` and `_build_feature_names` to dynamically track these columns, expanding the agent's state space safely.
+- **The Wow Factor:** The agent now sees mathematically how assets move together. It can intelligently hedge instead of guessing based linearly on single-asset signals. 
+
+### 15.3 Dynamic Slippage (`src/environment.py`)
+- The stagnant `0.1%` fixed buyer cost is completely gone.
+- Instead, the environment calculates dynamic slippage on each step scaling with traded volume: `Cost = Base_fee + 0.05 * price * shares * sqrt(shares / volume)`. We extract the trading volume directly from `self.data`.
+- **The Wow Factor:** The AI faces an authentic non-linear penalty for illiquid market impact—it can't just spam market orders without destroying its cash reserves.
+
+### 15.4 Action Masking / Absolute Safety Constraints (`src/environment.py`, `src/training.py` & `src/evaluate.py`)
+- Implemented `MultiDiscrete([21])` bin action spaces per ticker to create a valid mapping environment.
+- Added an `action_masks()` constraint into `StrategistTradingEnv`: if any single asset claims more than 40% of the entire portfolio equity, all positive (buy) bins are flagged `False`.
+- Safely swapped standard `PPO` for `sb3-contrib`'s `MaskablePPO` in the training pipeline, injecting the dynamically updating `action_masks` during both training sweeps and SHAP deterministic testing in `evaluate.py`.
+- **The Wow Factor:** The AI literally *cannot* perform catastrophic 100% dumps into one stock purely mathematically. No matter how much it hallucinates, the hard rules enforce 40% diversity max.
 
 ---
 
