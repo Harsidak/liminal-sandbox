@@ -53,30 +53,22 @@ from src.environment import build_environment
 # =====================================================================
 TICKERS = ["NIFTYBEES.NS", "RELIANCE.NS", "HDFCBANK.NS", "GOLDBEES.NS", "INFY.NS"]
 TICKER_LABELS = ["NIFTYBEES", "RELIANCE", "HDFCBANK", "GOLDBEES", "INFY"]
-TECH_INDICATORS = ["macd", "rsi_30", "vix_close", "tnx_close", "gold_close", "volume"]
 TEST_START = "2024-01-01"
 
-# Dynamically append covariance feature names alphabetically
-sorted_labels = sorted(TICKER_LABELS)
-for i in range(len(sorted_labels)):
-    for j in range(i, len(sorted_labels)):
-        TECH_INDICATORS.append(f"cov_{sorted_labels[i]}_{sorted_labels[j]}")
 
-def _build_feature_names():
+def _build_feature_names(tech_indicator_list):
     """
     Reconstructs human-readable names for each element of the flat
     state vector produced by StrategistTradingEnv.
+
+    Dynamically adapts to whatever tech_indicator_list the environment
+    was built with — no more hardcoded dimension assumptions.
     """
     names = ["cash"]
     names += [f"price_{t}" for t in TICKER_LABELS]
     names += [f"shares_{t}" for t in TICKER_LABELS]
-    for tech in TECH_INDICATORS:
-        if tech.startswith("cov_"):
-            # Covariance is a global array but repeated across stock_dim? 
-            # Yes, FinRL replicates ALL indicators across all tickers.
-            names += [f"{tech}_{t}" for t in TICKER_LABELS]
-        else:
-            names += [f"{tech}_{t}" for t in TICKER_LABELS]
+    for tech in tech_indicator_list:
+        names += [f"{tech}_{t}" for t in TICKER_LABELS]
     return names
 
 
@@ -95,7 +87,7 @@ def isolate_stress_event(returns, window=20):
     return rolling.idxmin()
 
 
-def generate_shap_report(model, docs_dir, portfolio_returns):
+def generate_shap_report(model, docs_dir, portfolio_returns, tech_indicator_list):
     """
     Uses SHAP DeepExplainer on the PPO Actor network to produce a
     beeswarm summary plot of feature importance.
@@ -106,7 +98,7 @@ def generate_shap_report(model, docs_dir, portfolio_returns):
     stress_date = isolate_stress_event(portfolio_returns)
     print(f"    -> Stress peak identified around: {stress_date.date()}")
 
-    feature_names = _build_feature_names()
+    feature_names = _build_feature_names(tech_indicator_list)
 
     # 2. Collect background observations from a rollout
     vec_env = model.get_env()
@@ -152,6 +144,13 @@ def generate_shap_report(model, docs_dir, portfolio_returns):
     else:
         sv = shap_values
 
+    # Truncate feature_names to match actual observation dimension
+    actual_dim = sv.shape[1] if sv.ndim == 2 else sv.shape[0]
+    if len(feature_names) > actual_dim:
+        feature_names = feature_names[:actual_dim]
+    elif len(feature_names) < actual_dim:
+        feature_names += [f"feat_{i}" for i in range(len(feature_names), actual_dim)]
+
     plt.figure(figsize=(14, 10))
     shap.summary_plot(
         sv,
@@ -182,9 +181,16 @@ def main():
     print("=" * 55)
 
     if not os.path.isfile(model_path):
-        print(f"[!] Champion model not found at: {model_path}")
-        print("    Run `python src/stitch.py` first to select a champion.")
-        return
+        # Fallback: try the direct final model if champion hasn't been promoted yet
+        alt_path = os.path.join(_PROJECT_ROOT, "models", "liminal_ppo_agent.zip")
+        if os.path.isfile(alt_path):
+            print(f"[*] Champion not found. Using final model: {alt_path}")
+            model_path = alt_path
+        else:
+            print(f"[!] No model found at: {model_path}")
+            print("    Run `python src/stitch.py` first to select a champion,")
+            print("    or ensure `models/liminal_ppo_agent.zip` exists.")
+            return
 
     # -----------------------------------------------------------------
     # 2. Acquire test data (2024 → today)
@@ -193,7 +199,10 @@ def main():
     print(f"\n[*] Loading test data: {TEST_START} to {end_date}")
 
     df_test = fetch_and_process_data(TEST_START, end_date, TICKERS)
-    env_test, _ = build_environment(df_test)
+    env_test, env_kwargs = build_environment(df_test)
+
+    # Extract tech_indicator_list from the env_kwargs for SHAP feature naming
+    tech_indicator_list = env_kwargs.get("tech_indicator_list", [])
 
     print(f"[*] Loading champion model: {model_path}")
     model = PPO.load(model_path, env=env_test)
@@ -274,7 +283,7 @@ def main():
     # 5. Explainable AI (SHAP)
     # -----------------------------------------------------------------
     try:
-        generate_shap_report(model, docs_dir, returns)
+        generate_shap_report(model, docs_dir, returns, tech_indicator_list)
     except Exception as e:
         print(f"[!] SHAP analysis failed: {type(e).__name__}: {e}")
         print("    This is non-fatal — financial reports were still generated.")

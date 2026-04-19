@@ -30,7 +30,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import mlflow
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO as PPO
 from src.data_pipeline import fetch_and_process_data
 from src.environment import build_environment
 
@@ -41,7 +41,7 @@ from src.environment import build_environment
 TICKERS = ["NIFTYBEES.NS", "RELIANCE.NS", "HDFCBANK.NS", "GOLDBEES.NS", "INFY.NS"]
 VAL_START = "2023-01-01"
 VAL_END = "2024-01-01"
-NUM_EVAL_EPISODES = 5
+NUM_EVAL_EPISODES = 3
 
 
 def run_evaluation_episodes(model, env, num_episodes=NUM_EVAL_EPISODES):
@@ -62,7 +62,9 @@ def run_evaluation_episodes(model, env, num_episodes=NUM_EVAL_EPISODES):
         done = False
 
         while not done:
-            action, _ = model.predict(obs, deterministic=True)
+            # MaskablePPO requires action_masks for predict()
+            action_masks = np.array(vec_env.env_method("action_masks"))
+            action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
             obs, _, dones, _ = vec_env.step(action)
 
             if dones[0]:

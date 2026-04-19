@@ -4,7 +4,50 @@ import mlflow
 import numpy as np
 from sb3_contrib import MaskablePPO as PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from src.environment import build_environment
+
+
+# =====================================================================
+# SubprocVecEnv Factory
+# =====================================================================
+# SubprocVecEnv requires a list of *callables* (not pre-built envs).
+# Each callable must construct a completely independent environment
+# inside its own subprocess — sharing a single env object across
+# processes would cause memory corruption.
+# =====================================================================
+
+def _make_env_fn(df, env_kwargs_override=None):
+    """
+    Returns a zero-argument callable that builds a fresh StrategistTradingEnv.
+    This is the factory pattern required by SubprocVecEnv.
+    """
+    def _init():
+        env, _ = build_environment(df)
+        return env
+    return _init
+
+
+def make_parallel_env(df, n_envs=8):
+    """
+    Creates a SubprocVecEnv with `n_envs` independent environment workers.
+
+    Each worker gets its own copy of the dataframe and runs in a separate
+    process. On an i5-13th Gen (12+ logical cores), n_envs=8 is the sweet
+    spot — leaves headroom for the OS and the main training process.
+
+    Falls back to DummyVecEnv (single-process) if SubprocVecEnv fails
+    (e.g. on systems where fork/spawn is restricted).
+    """
+    env_fns = [_make_env_fn(df) for _ in range(n_envs)]
+    try:
+        vec_env = SubprocVecEnv(env_fns, start_method="spawn")
+        print(f"  [✓] SubprocVecEnv created with {n_envs} parallel workers (spawn)")
+    except Exception as e:
+        print(f"  [!] SubprocVecEnv failed ({e}). Falling back to DummyVecEnv.")
+        vec_env = DummyVecEnv(env_fns)
+    return vec_env
+
 
 class MLflowCallback(BaseCallback):
     """
@@ -42,18 +85,20 @@ def make_objective(df):
     - ent_coef      : Entropy coefficient — forces exploration of diverse allocations
     - gamma         : Discount factor — extremely high values (0.999+) make the agent
                       prioritize long-term survival over immediate daily gains
+    - n_epochs      : Number of PPO update epochs per rollout (higher = more gradient steps)
+    - clip_range    : PPO clipping parameter — controls policy update magnitude
     """
     def optimize_ppo(trial):
         with mlflow.start_run(nested=True, run_name=f"Trial_{trial.number}"):
             # --- Core PPO Hyperparameters ---
             learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-            batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
-            n_steps = trial.suggest_categorical("n_steps", [2048, 4096])
+            batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
+            n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
 
             # --- Exploration: Entropy Coefficient ---
             # Forces the agent to explore diverse asset allocations rather than
             # converging on a single repetitive strategy (e.g., always buying NIFTY).
-            ent_coef = trial.suggest_float("ent_coef", 1e-4, 0.01, log=True)
+            ent_coef = trial.suggest_float("ent_coef", 1e-4, 0.05, log=True)
 
             # --- Long-Horizon: Discount Factor (Gamma) ---
             # Controls how much the agent values future rewards vs immediate ones.
@@ -61,7 +106,11 @@ def make_objective(df):
             # so the agent cares about compounding survival, not just today's P&L.
             gamma = trial.suggest_float("gamma", 0.99, 0.9999, log=True)
 
-            # Build Env
+            # --- PPO Update Depth ---
+            n_epochs = trial.suggest_int("n_epochs", 5, 20)
+            clip_range = trial.suggest_float("clip_range", 0.1, 0.3)
+
+            # Build single env for Optuna trials (parallel is overkill for 50k steps)
             env, _ = build_environment(df)
 
             # Initialize PPO with full expanded parameter set
@@ -73,7 +122,10 @@ def make_objective(df):
                 n_steps=n_steps,
                 ent_coef=ent_coef,
                 gamma=gamma,
+                n_epochs=n_epochs,
+                clip_range=clip_range,
                 verbose=0,
+                device="auto",
             )
 
             # Train for 50k timesteps per trial with live MLflow streaming
@@ -99,6 +151,8 @@ def make_objective(df):
                 "n_steps": n_steps,
                 "ent_coef": ent_coef,
                 "gamma": gamma,
+                "n_epochs": n_epochs,
+                "clip_range": clip_range,
             })
             mlflow.log_metric("trial_mean_reward", mean_reward)
 
@@ -106,34 +160,46 @@ def make_objective(df):
 
     return optimize_ppo
 
-def train_final_model(df, best_params):
+def train_final_model(df, best_params, n_envs=8, total_timesteps=10_000_000):
     """
     Trains the final PPO model with Optuna-optimized parameters and saves it.
 
-    Safety strategy for i5-13th Gen / RTX 4050 hardware:
-    1. Saves a checkpoint every 250k steps to models/checkpoints/
-    2. Runs initial 500k steps first, saves a backup .zip
-    3. Continues training to 10M total steps with ongoing checkpoints
+    Production strategy for i5-13th Gen / RTX 4050 hardware:
+    1. Creates a SubprocVecEnv with `n_envs` parallel environment workers
+    2. Saves a checkpoint every 250k steps to models/checkpoints/
+    3. Runs initial 1M steps first, saves a backup .zip
+    4. Continues training to `total_timesteps` with ongoing checkpoints
+
+    IMPORTANT: With SubprocVecEnv, effective throughput is multiplied by n_envs.
+    SB3 counts total_timesteps as the sum across ALL environments, so the wall-
+    clock time is roughly (total_timesteps / n_envs / steps_per_second).
     """
-    print("\nTraining Final PPO Agent with optimized parameters...")
-    env, _ = build_environment(df)
+    print(f"\nTraining Final PPO Agent with optimized parameters...")
+    print(f"  Parallel workers: {n_envs}")
+    print(f"  Target timesteps: {total_timesteps:,}")
+
+    # Build parallel environment
+    vec_env = make_parallel_env(df, n_envs=n_envs)
 
     final_model = PPO(
         "MlpPolicy",
-        env,
+        vec_env,
         learning_rate=best_params["learning_rate"],
         batch_size=best_params["batch_size"],
         n_steps=best_params["n_steps"],
         ent_coef=best_params.get("ent_coef", 0.001),
         gamma=best_params.get("gamma", 0.999),
+        n_epochs=best_params.get("n_epochs", 10),
+        clip_range=best_params.get("clip_range", 0.2),
         verbose=1,
-        tensorboard_log="./logs/"
+        tensorboard_log="./logs/",
+        device="auto",
     )
 
     # Setup checkpoint callback: saves a .zip every 250k steps
     os.makedirs("models/checkpoints", exist_ok=True)
     checkpoint_cb = CheckpointCallback(
-        save_freq=250_000,
+        save_freq=max(250_000 // n_envs, 1),   # SB3 counts per-env steps for callbacks
         save_path="./models/checkpoints/",
         name_prefix="liminal_ppo",
         save_replay_buffer=False,
@@ -143,10 +209,11 @@ def train_final_model(df, best_params):
     # Combine standard checkpoint saving with our live MLflow streaming
     callback = CallbackList([checkpoint_cb, MLflowCallback()])
 
-    # --- Phase 1: Initial 500k step safety run ---
+    # --- Phase 1: Initial 1M step safety run ---
     # Get a usable model on disk ASAP before committing to the full marathon.
-    print("\n[Phase 1/2] Training initial 1M steps (safety backup)...")
-    final_model.learn(total_timesteps=1_000_000, callback=callback)
+    warmup_steps = min(1_000_000, total_timesteps)
+    print(f"\n[Phase 1/2] Training initial {warmup_steps:,} steps (safety backup)...")
+    final_model.learn(total_timesteps=warmup_steps, callback=callback)
 
     os.makedirs("models", exist_ok=True)
     backup_path = "models/liminal_ppo_agent_backup"
@@ -154,14 +221,17 @@ def train_final_model(df, best_params):
     print(f"  Backup saved to {backup_path}.zip")
     mlflow.log_artifact(f"{backup_path}.zip")
 
-    # --- Phase 2: Continue to 3M total steps ---
+    # --- Phase 2: Continue to total_timesteps ---
     # SB3's learn() with reset_num_timesteps=False continues from where Phase 1 left off.
-    print("\n[Phase 2/2] Continuing training to 10M total steps...")
-    final_model.learn(
-        total_timesteps=10_000_000,
-        callback=callback,
-        reset_num_timesteps=False,
-    )
+    # The total_timesteps here is the GLOBAL target — SB3 will stop once num_timesteps reaches it.
+    remaining = total_timesteps - warmup_steps
+    if remaining > 0:
+        print(f"\n[Phase 2/2] Continuing training to {total_timesteps:,} total steps...")
+        final_model.learn(
+            total_timesteps=total_timesteps,
+            callback=callback,
+            reset_num_timesteps=False,
+        )
 
     # Export final brain
     export_path = "models/liminal_ppo_agent"
@@ -170,5 +240,8 @@ def train_final_model(df, best_params):
 
     # Log to MLflow
     mlflow.log_artifact(f"{export_path}.zip")
+
+    # Clean up SubprocVecEnv workers
+    vec_env.close()
 
     return final_model
